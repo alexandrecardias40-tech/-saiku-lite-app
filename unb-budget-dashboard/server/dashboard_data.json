@@ -1,0 +1,17 @@
+{
+  "kpis": {
+    "total_anual_estimado": 0,
+    "total_empenhado": 0,
+    "total_comprometido": 0,
+    "saldo_a_empenhar": 0,
+    "percentual_execucao": 0,
+    "taxa_execucao": 0,
+    "count_expiring_contracts": 0,
+    "count_expired_contracts": 0
+  },
+  "monthly_consumption": [],
+  "ugr_analysis": [],
+  "expiring_contracts_list": [],
+  "expired_contracts_list": [],
+  "raw_data_for_filters": []
+}
