@@ -51,5 +51,6 @@ saiku_lite/
 - Limitações: datasets grandes podem consumir muita memória, já que tudo fica em RAM. Para produção recomenda-se adicionar persistência e limites de tamanho.
 - Ao reiniciar o servidor os datasets são descartados.
 - Para habilitar acesso externo, configure `FLASK_RUN_HOST=0.0.0.0` ou ajuste `app.run(host="0.0.0.0")`.
+- A interface moderna em React só é habilitada quando `SAIKU_DASHBOARD_MODE=spa`. Sem esse flag a aplicação usa o dashboard fallback nativo em Flask, garantindo funcionamento mesmo sem backend Node.
 
 Sinta-se à vontade para expandir com autenticação, exportação, ou conexão com cubos OLAP no futuro.
