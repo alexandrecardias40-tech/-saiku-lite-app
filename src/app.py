@@ -823,6 +823,198 @@ def shutdown_node_server(exception=None):
         NODE_SERVER_PROCESS = None
 
 
+_MONTH_KEY_REGEX = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+
+def _dash_to_number(value: Any) -> float:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return 0.0
+    return number if math.isfinite(number) else 0.0
+
+
+def _dash_sum_month_values(row: Dict[str, Any]) -> float:
+    total = 0.0
+    for key, value in row.items():
+        if isinstance(key, str) and _MONTH_KEY_REGEX.match(key):
+            total += _dash_to_number(value)
+    return total
+
+
+def _dash_normalize_row(row: Dict[str, Any]) -> Dict[str, Any]:
+    normalized = dict(row)
+    total_estimado = _dash_to_number(row.get("Total_Anual_Estimado"))
+    executado_informado = _dash_to_number(row.get("Executado_Total"))
+    empenho_rap = _dash_to_number(row.get("Total_Empenho_RAP"))
+    saldo25 = _dash_to_number(row.get("Saldo_Empenhos_2025"))
+    saldo_rap = _dash_to_number(row.get("Saldo_Empenhos_RAP"))
+    meses = _dash_sum_month_values(row)
+
+    comprometido = empenho_rap or (saldo25 + saldo_rap)
+    executado = executado_informado or meses or comprometido
+    taxa_execucao = (executado / total_estimado * 100.0) if total_estimado > 0 else 0.0
+
+    normalized.update(
+        {
+            "Total_Anual_Estimado": total_estimado,
+            "Total_Empenho_RAP": comprometido,
+            "Executado_Total": executado,
+            "Taxa_Execucao": taxa_execucao,
+        }
+    )
+    return normalized
+
+
+def _dash_normalize_token(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    if text in {"", "nan", "none", "null"}:
+        return ""
+    return text
+
+
+def _dash_should_discard_row(row: Dict[str, Any]) -> bool:
+    description = _dash_normalize_token(row.get("Despesa") or row.get("descricao"))
+    ugr = _dash_normalize_token(row.get("UGR") or row.get("ugr"))
+    pi = _dash_normalize_token(row.get("PI_2025") or row.get("pi"))
+
+    if not description:
+        return False
+    if description in {"total", "total geral"}:
+        return True
+    if description.startswith("total da") or description.startswith("total de"):
+        return True
+    if description.startswith("total ") and not ugr:
+        return True
+    if not description and not ugr and not pi:
+        return True
+    return False
+
+
+def _dash_build_ugr_analysis(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    today = datetime.utcnow().date()
+    stats_map: Dict[str, Dict[str, Any]] = {}
+
+    for row in rows:
+        ugr_key = str(row.get("UGR") or "Não informado")
+        stats = stats_map.setdefault(
+            ugr_key,
+            {
+                "UGR": ugr_key,
+                "Total_Anual_Estimado": 0.0,
+                "Total_Empenho_RAP": 0.0,
+                "Executado_Total": 0.0,
+                "Comprometido_Total": 0.0,
+                "Contratos_Ativos": 0,
+                "Contratos_Expirados": 0,
+                "Percentual_Execucao": 0.0,
+            },
+        )
+
+        total_estimado = _dash_to_number(row.get("Total_Anual_Estimado"))
+        executado = _dash_to_number(row.get("Executado_Total"))
+        rap = _dash_to_number(row.get("Total_Empenho_RAP"))
+        saldo = _dash_to_number(row.get("Saldo_Empenhos_2025")) + _dash_to_number(row.get("Saldo_Empenhos_RAP"))
+        comprometido = rap if rap > 0 else saldo
+        status = str(row.get("Status_Contrato") or "").upper()
+
+        stats["Total_Anual_Estimado"] += total_estimado
+        stats["Executado_Total"] += executado
+        stats["Total_Empenho_RAP"] += comprometido
+        stats["Comprometido_Total"] += comprometido
+
+        expired = False
+        raw_date = row.get("Data_Vigencia_Fim")
+        if raw_date:
+            try:
+                parsed = datetime.fromisoformat(str(raw_date).split()[0])
+                if parsed.date() < today:
+                    expired = True
+            except ValueError:
+                expired = False
+        if not expired:
+            if "VENC" in status and "VENCENDO" not in status:
+                expired = True
+
+        if expired:
+            stats["Contratos_Expirados"] += 1
+        else:
+            stats["Contratos_Ativos"] += 1
+
+    results: List[Dict[str, Any]] = []
+    for stats in stats_map.values():
+        total_estimado = stats["Total_Anual_Estimado"]
+        executado = stats["Executado_Total"]
+        stats["Percentual_Execucao"] = (executado / total_estimado * 100.0) if total_estimado > 0 else 0.0
+        results.append(stats)
+
+    return results
+
+
+def _dash_build_kpis(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
+    total_estimado = sum(_dash_to_number(row.get("Total_Anual_Estimado")) for row in rows)
+    executado = sum(_dash_to_number(row.get("Executado_Total")) for row in rows)
+    comprometido = 0.0
+    for row in rows:
+        rap = _dash_to_number(row.get("Total_Empenho_RAP"))
+        saldo = _dash_to_number(row.get("Saldo_Empenhos_2025")) + _dash_to_number(row.get("Saldo_Empenhos_RAP"))
+        comprometido += rap if rap > 0 else saldo
+
+    saldo_a_empenhar = max(total_estimado - executado, 0.0)
+    percentual = (executado / total_estimado * 100.0) if total_estimado > 0 else 0.0
+
+    today = datetime.utcnow().date()
+    expiring = 0
+    expired = 0
+    for row in rows:
+        raw_date = row.get("Data_Vigencia_Fim")
+        status = str(row.get("Status_Contrato") or "").upper()
+        delta: Optional[int] = None
+        if raw_date:
+            try:
+                parsed = datetime.fromisoformat(str(raw_date).split()[0])
+                delta = (parsed.date() - today).days
+            except ValueError:
+                delta = None
+        if delta is not None:
+            if 0 <= delta <= LIMITE_DIAS_VENCIMENTO:
+                expiring += 1
+            elif delta < 0:
+                expired += 1
+        elif "VENC" in status and "VENCENDO" not in status:
+            expired += 1
+
+    return {
+        "total_anual_estimado": total_estimado,
+        "total_empenhado": executado,
+        "total_comprometido": comprometido,
+        "saldo_a_empenhar": saldo_a_empenhar,
+        "percentual_execucao": percentual,
+        "taxa_execucao": percentual,
+        "count_expiring_contracts": expiring,
+        "count_expired_contracts": expired,
+    }
+
+
+def _normalized_dashboard_payload() -> Dict[str, Any]:
+    payload = _load_dashboard_payload()
+    rows = payload.get("raw_data_for_filters") or []
+    filtered = [row for row in rows if isinstance(row, dict) and not _dash_should_discard_row(row)]
+    normalized_rows = [_dash_normalize_row(dict(row)) for row in filtered]
+
+    normalized_payload = copy.deepcopy(payload)
+    if isinstance(normalized_payload.get("kpis"), dict):
+        existing_kpis = dict(normalized_payload["kpis"])
+    else:
+        existing_kpis = {}
+
+    normalized_payload["raw_data_for_filters"] = normalized_rows
+    normalized_payload["ugr_analysis"] = _dash_build_ugr_analysis(normalized_rows)
+    normalized_payload["kpis"] = {**existing_kpis, **_dash_build_kpis(normalized_rows)}
+
+    return normalized_payload
+
+
 def _execute_dashboard_trpc_procedure(name: str, payload: Any) -> Any:
     if name == "auth.me":
         user = _get_current_user()
@@ -834,7 +1026,7 @@ def _execute_dashboard_trpc_procedure(name: str, payload: Any) -> Any:
     if not name.startswith("budget."):
         return None
 
-    data = _load_dashboard_payload()
+    data = _normalized_dashboard_payload()
     if name == "budget.getKPIs":
         return data.get("kpis", {})
     if name == "budget.getUGRAnalysis":
