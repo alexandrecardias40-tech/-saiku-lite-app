@@ -696,6 +696,9 @@ def _proxy_request_to_backend(path: str):
     target = urljoin(API_BACKEND.rstrip('/') + '/', path.lstrip('/'))
     # Forward headers (except Host)
     headers = {k: v for k, v in request.headers if k.lower() != 'host'}
+    is_trpc = path.startswith("/api/trpc")
+    if is_trpc and _using_local_dashboard_backend():
+        return _handle_dashboard_trpc(path)
     try:
         resp = requests.request(
             method=request.method,
@@ -707,9 +710,16 @@ def _proxy_request_to_backend(path: str):
             allow_redirects=False,
             timeout=10,
         )
-    except requests.RequestException as exc:
+    except requests.RequestException:
+        if is_trpc:
+            app.logger.warning("Falha ao contatar backend %s, usando payload local.", target)
+            return _handle_dashboard_trpc(path)
         app.logger.exception("Erro ao proxyar requisição para backend %s", target)
         return jsonify({"error": "Erro ao contatar backend de dados."}), 502
+
+    if is_trpc and resp.status_code >= 500:
+        app.logger.warning("Backend %s retornou %s. Usando fallback interno.", target, resp.status_code)
+        return _handle_dashboard_trpc(path)
 
     excluded_headers = [
         'content-encoding',
