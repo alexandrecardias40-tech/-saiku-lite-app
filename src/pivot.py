@@ -12,6 +12,16 @@ import numpy as np
 import pandas as pd
 
 
+def _sort_axis_safely(frame: pd.DataFrame, axis: int) -> pd.DataFrame:
+    """Sort DataFrame index/columns even when labels have mixed types."""
+    try:
+        return frame.sort_index(axis=axis)
+    except TypeError:
+        labels = frame.index if axis == 0 else frame.columns
+        order = sorted(range(len(labels)), key=lambda idx: str(labels[idx]))
+        return frame.take(order, axis=axis)
+
+
 @dataclass
 class PivotResult:
     dataset_id: str
@@ -449,8 +459,8 @@ def build_pivot(
     if isinstance(grouped, pd.Series):
         grouped = grouped.to_frame(name=measures[0])
 
-    grouped = grouped.sort_index(axis=0)
-    grouped = grouped.sort_index(axis=1)
+    grouped = _sort_axis_safely(grouped, axis=0)
+    grouped = _sort_axis_safely(grouped, axis=1)
 
     return _create_pivot_result_from_grouped(
         dataset_id=dataset_id,

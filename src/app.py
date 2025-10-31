@@ -767,6 +767,8 @@ def _proxy_request_to_backend(path: str):
     target = urljoin(API_BACKEND.rstrip('/') + '/', path.lstrip('/'))
     # Forward headers (except Host)
     headers = {k: v for k, v in request.headers if k.lower() != 'host'}
+    if _using_local_dashboard_backend() and not _dashboard_backend_available():
+        return jsonify({"error": "Backend do dashboard indisponível."}), 503
     try:
         resp = requests.request(
             method=request.method,
