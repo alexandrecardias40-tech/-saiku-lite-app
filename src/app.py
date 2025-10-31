@@ -475,7 +475,12 @@ def _render_dashboard_fallback():
 def _serve_dashboard_entry():
     _start_node_server()
     if _unb_dashboard_available():
-        return _serve_unb_dashboard_index()
+        if _dashboard_backend_available():
+            return _serve_unb_dashboard_index()
+        app.logger.warning(
+            "UnB dashboard SPA assets disponíveis, mas backend indisponível. "
+            "Alternando para interface fallback."
+        )
 
     dashboard_dir = os.path.join(app.static_folder, "dashboard")
     index_path = os.path.join(dashboard_dir, "index.html")
