@@ -85,6 +85,9 @@ UNB_DASHBOARD_PUBLIC = Path(
 DEFAULT_UNB_DASHBOARD_DATA = BASE_DIR / "unb-budget-dashboard" / "dashboard_data.json"
 UNB_DASHBOARD_DATA = Path(os.environ.get("UNB_DASHBOARD_DATA", str(DEFAULT_UNB_DASHBOARD_DATA))).expanduser()
 
+_DASHBOARD_PAYLOAD_CACHE: Optional[Dict[str, Any]] = None
+_DASHBOARD_PAYLOAD_MTIME: float = 0.0
+
 def _get_current_user() -> Optional[Dict[str, Any]]:
     user_id = session.get("user_id")
     if not user_id:
@@ -535,12 +538,12 @@ def _render_dashboard_fallback():
 def _serve_dashboard_entry():
     _start_node_server()
     if _unb_dashboard_available():
-        if _dashboard_backend_available():
-            return _serve_unb_dashboard_index()
-        app.logger.warning(
-            "UnB dashboard SPA assets disponíveis, mas backend indisponível. "
-            "Alternando para interface fallback."
-        )
+        if not _dashboard_backend_available():
+            app.logger.warning(
+                "UnB dashboard SPA disponível sem backend Node.js. "
+                "Respondendo via camada interna."
+            )
+        return _serve_unb_dashboard_index()
 
     dashboard_dir = os.path.join(app.static_folder, "dashboard")
     index_path = os.path.join(dashboard_dir, "index.html")
@@ -552,6 +555,50 @@ def _serve_dashboard_entry():
         return response
 
     return _render_dashboard_fallback()
+
+
+def _dashboard_payload_default() -> Dict[str, Any]:
+    return {
+        "kpis": {
+            "total_anual_estimado": 0.0,
+            "total_empenhado": 0.0,
+            "total_comprometido": 0.0,
+            "saldo_a_empenhar": 0.0,
+            "percentual_execucao": 0.0,
+            "taxa_execucao": 0.0,
+            "count_expiring_contracts": 0,
+            "count_expired_contracts": 0,
+        },
+        "monthly_consumption": [],
+        "ugr_analysis": [],
+        "expiring_contracts_list": [],
+        "expired_contracts_list": [],
+        "raw_data_for_filters": [],
+    }
+
+
+def _load_dashboard_payload() -> Dict[str, Any]:
+    global _DASHBOARD_PAYLOAD_CACHE, _DASHBOARD_PAYLOAD_MTIME
+    try:
+        stats = UNB_DASHBOARD_DATA.stat()
+    except FileNotFoundError:
+        return _dashboard_payload_default()
+
+    if (
+        _DASHBOARD_PAYLOAD_CACHE is None
+        or not isinstance(_DASHBOARD_PAYLOAD_CACHE, dict)
+        or _DASHBOARD_PAYLOAD_MTIME != stats.st_mtime
+    ):
+        try:
+            data = json.loads(UNB_DASHBOARD_DATA.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            _DASHBOARD_PAYLOAD_CACHE = _dashboard_payload_default()
+            _DASHBOARD_PAYLOAD_MTIME = stats.st_mtime
+            return copy.deepcopy(_DASHBOARD_PAYLOAD_CACHE)
+        _DASHBOARD_PAYLOAD_CACHE = data
+        _DASHBOARD_PAYLOAD_MTIME = stats.st_mtime
+
+    return copy.deepcopy(_DASHBOARD_PAYLOAD_CACHE)
 
 
 def _persist_unb_dashboard_dataset(dataset):
@@ -569,6 +616,14 @@ def _persist_unb_dashboard_dataset(dataset):
     except Exception:
         app.logger.exception("Erro ao salvar dashboard_data.json")
         raise
+    try:
+        stats = UNB_DASHBOARD_DATA.stat()
+    except FileNotFoundError:
+        stats = None
+    global _DASHBOARD_PAYLOAD_CACHE, _DASHBOARD_PAYLOAD_MTIME
+    _DASHBOARD_PAYLOAD_CACHE = copy.deepcopy(payload)
+    if stats:
+        _DASHBOARD_PAYLOAD_MTIME = stats.st_mtime
     _notify_unb_backend_refresh()
 
 
@@ -768,12 +823,79 @@ def shutdown_node_server(exception=None):
         NODE_SERVER_PROCESS = None
 
 
+def _execute_dashboard_trpc_procedure(name: str, payload: Any) -> Any:
+    if name == "auth.me":
+        user = _get_current_user()
+        return _public_user(user)
+    if name == "auth.logout":
+        session.clear()
+        return {"success": True}
+
+    if not name.startswith("budget."):
+        return None
+
+    data = _load_dashboard_payload()
+    if name == "budget.getKPIs":
+        return data.get("kpis", {})
+    if name == "budget.getUGRAnalysis":
+        return data.get("ugr_analysis", [])
+    if name == "budget.getMonthlyConsumption":
+        return data.get("monthly_consumption", [])
+    if name == "budget.getExpiringContracts":
+        return data.get("expiring_contracts_list", [])
+    if name == "budget.getExpiredContracts":
+        return data.get("expired_contracts_list", [])
+    if name == "budget.getAllData":
+        return data.get("raw_data_for_filters", [])
+    if name == "budget.uploadFile":
+        return {"success": True, "message": "Arquivo processado com sucesso!"}
+    return None
+
+
+def _handle_dashboard_trpc(path: str):
+    prefix = "/api/trpc"
+    procedure_path = path[len(prefix):].lstrip("/") if path.startswith(prefix) else path.lstrip("/")
+    if not procedure_path:
+        return Response("{}", status=200, mimetype="application/json")
+
+    procedures = [item for item in procedure_path.split(",") if item]
+    if not procedures:
+        return Response("{}", status=200, mimetype="application/json")
+
+    raw_input = request.args.get("input")
+    if raw_input is None and request.method != "GET":
+        raw_input = request.get_data(as_text=True)
+
+    if not raw_input or raw_input == "null":
+        batch_payload: Dict[str, Any] = {}
+    else:
+        try:
+            batch_payload = json.loads(raw_input)
+        except (ValueError, TypeError):
+            batch_payload = {}
+
+    response_payload: Dict[str, Any] = {}
+    for index, procedure in enumerate(procedures):
+        key = str(index)
+        proc_input = None
+        if isinstance(batch_payload, dict):
+            entry = batch_payload.get(key)
+            if isinstance(entry, dict):
+                proc_input = entry.get("json")
+        result_data = _execute_dashboard_trpc_procedure(procedure, proc_input)
+        response_payload[key] = {"result": {"data": result_data}}
+
+    return Response(json.dumps(response_payload, ensure_ascii=False), status=200, mimetype="application/json")
+
+
 def _proxy_request_to_backend(path: str):
     # Build target URL
     target = urljoin(API_BACKEND.rstrip('/') + '/', path.lstrip('/'))
     # Forward headers (except Host)
     headers = {k: v for k, v in request.headers if k.lower() != 'host'}
     if _using_local_dashboard_backend() and not _dashboard_backend_available():
+        if path.startswith("/api/trpc"):
+            return _handle_dashboard_trpc(path)
         return jsonify({"error": "Backend do dashboard indisponível."}), 503
     try:
         resp = requests.request(
