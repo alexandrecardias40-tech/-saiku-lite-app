@@ -87,7 +87,7 @@ UNB_DASHBOARD_PUBLIC = Path(
 ).expanduser()
 DEFAULT_UNB_DASHBOARD_DATA = BASE_DIR / "unb-budget-dashboard" / "dashboard_data.json"
 UNB_DASHBOARD_DATA = Path(os.environ.get("UNB_DASHBOARD_DATA", str(DEFAULT_UNB_DASHBOARD_DATA))).expanduser()
-DASHBOARD_MODE = os.environ.get("SAIKU_DASHBOARD_MODE", "fallback").strip().lower()
+DASHBOARD_MODE = os.environ.get("SAIKU_DASHBOARD_MODE", "spa").strip().lower()
 
 _DASHBOARD_PAYLOAD_CACHE: Optional[Dict[str, Any]] = None
 _DASHBOARD_PAYLOAD_MTIME: float = 0.0
@@ -540,25 +540,26 @@ def _render_dashboard_fallback():
 
 
 def _serve_dashboard_entry():
-    if DASHBOARD_MODE == "spa":
-        _start_node_server()
-        if _unb_dashboard_available():
-            if not _dashboard_backend_available():
-                app.logger.warning(
-                    "UnB dashboard SPA disponível sem backend Node.js. "
-                    "Respondendo via camada interna."
-                )
-            return _serve_unb_dashboard_index()
+    if DASHBOARD_MODE == "fallback":
+        return _render_dashboard_fallback()
 
-    if DASHBOARD_MODE == "spa":
-        dashboard_dir = os.path.join(app.static_folder, "dashboard")
-        index_path = os.path.join(dashboard_dir, "index.html")
-        spa_available = os.path.exists(index_path) and _dashboard_backend_available()
+    _start_node_server()
+    if _unb_dashboard_available():
+        if not _dashboard_backend_available():
+            app.logger.warning(
+                "UnB dashboard SPA disponível sem backend Node.js. "
+                "Respondendo via camada interna."
+            )
+        return _serve_unb_dashboard_index()
 
-        if spa_available:
-            response = send_from_directory(dashboard_dir, "index.html")
-            response.cache_control.no_cache = True
-            return response
+    dashboard_dir = os.path.join(app.static_folder, "dashboard")
+    index_path = os.path.join(dashboard_dir, "index.html")
+    spa_available = os.path.exists(index_path) and _dashboard_backend_available()
+
+    if spa_available:
+        response = send_from_directory(dashboard_dir, "index.html")
+        response.cache_control.no_cache = True
+        return response
 
     return _render_dashboard_fallback()
 
