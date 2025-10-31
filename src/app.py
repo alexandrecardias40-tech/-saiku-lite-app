@@ -58,6 +58,12 @@ from .users import UserStore
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("SAIKU_SECRET_KEY", "change-me")
 
+
+@app.route("/healthz")
+def healthz() -> tuple[str, int]:
+    """Health check endpoint used by hosting providers."""
+    return "ok", 200
+
 ADMIN_USERNAME = os.environ.get("SAIKU_ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("SAIKU_ADMIN_PASSWORD", "senha123")
 

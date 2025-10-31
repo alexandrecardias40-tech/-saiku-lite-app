@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+.saiku_lite.log
+instance/*.db
+portable/
