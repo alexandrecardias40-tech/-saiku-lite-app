@@ -702,7 +702,13 @@ def _dashboard_backend_available() -> bool:
     """Indica se existe backend configurado para alimentar o SPA."""
     if not _using_local_dashboard_backend():
         return True
-    return _node_environment_ready()
+    if not _node_environment_ready():
+        return False
+    try:
+        response = requests.get(API_BACKEND, timeout=1)
+        return response.ok
+    except requests.RequestException:
+        return False
 
 
 def _start_node_server():
