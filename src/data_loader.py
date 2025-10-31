@@ -105,8 +105,8 @@ def _prepare_excel_candidate(frame: pd.DataFrame) -> Optional[pd.DataFrame]:
     if data.empty:
         return None
 
-    for column in data.columns:
-        series = data[column]
+    for idx, column in enumerate(data.columns):
+        series = data.iloc[:, idx]
         if series.dtype == object:
             data[column] = series.apply(lambda value: value.strip() if isinstance(value, str) else value)
 
