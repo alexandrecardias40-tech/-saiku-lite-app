@@ -5,7 +5,8 @@ import csv
 import io
 import json
 import os
-from typing import Optional
+import re
+from typing import List, Optional, Tuple
 
 import pandas as pd
 
@@ -51,6 +52,93 @@ def _read_json_dataframe(content: bytes) -> pd.DataFrame:
     raise DataLoaderError("Formato JSON não suportado: é necessário um array de objetos ou campo 'data'.")
 
 
+def _ensure_unique_columns(columns: List[str]) -> List[str]:
+    normalized = []
+    seen: dict[str, int] = {}
+    for idx, value in enumerate(columns):
+        if value is None:
+            value = ""
+        name = str(value).strip()
+        if not name or name.lower().startswith("unnamed:"):
+            name = f"coluna_{idx + 1}"
+        name = re.sub(r"\s+", " ", name)
+        counter = seen.get(name, 0)
+        if counter:
+            name = f"{name}_{counter + 1}"
+        seen[name] = counter + 1
+        normalized.append(name)
+    return normalized
+
+
+def _prepare_excel_candidate(frame: pd.DataFrame) -> Optional[pd.DataFrame]:
+    if frame.empty:
+        return None
+    frame = frame.copy()
+    frame = frame.replace(r"^\s*$", pd.NA, regex=True)
+    frame = frame.dropna(how="all")
+    if frame.empty:
+        return None
+
+    header_row = None
+    max_scan = min(len(frame), 25)
+    for idx in range(max_scan):
+        row = frame.iloc[idx]
+        filled = [str(value).strip() for value in row if pd.notna(value)]
+        filled = [value for value in filled if value]
+        distinct = set(filled)
+        if len(filled) >= 3 and len(distinct) >= 2:
+            header_row = idx
+            break
+
+    if header_row is None:
+        return None
+
+    header_values = frame.iloc[header_row].tolist()
+    columns = _ensure_unique_columns(header_values)
+    data = frame.iloc[header_row + 1 :].reset_index(drop=True)
+    if data.empty:
+        return None
+
+    data.columns = columns
+    data = data.dropna(how="all")
+    data = data.loc[:, ~(data.isna().all())]
+    if data.empty:
+        return None
+
+    for column in data.columns:
+        series = data[column]
+        if series.dtype == object:
+            data[column] = series.apply(lambda value: value.strip() if isinstance(value, str) else value)
+
+    return data
+
+
+def _read_excel_dataframe(content: bytes) -> pd.DataFrame:
+    buffer = io.BytesIO(content)
+    try:
+        excel = pd.ExcelFile(buffer)
+    except ValueError as exc:
+        raise DataLoaderError(f"Não foi possível abrir o arquivo Excel: {exc}") from exc
+
+    best_score: Tuple[int, int] = (-1, -1)
+    best_frame: Optional[pd.DataFrame] = None
+    for sheet_name in excel.sheet_names:
+        raw = excel.parse(sheet_name, header=None, dtype=object)
+        candidate = _prepare_excel_candidate(raw)
+        if candidate is None:
+            continue
+        score = (candidate.shape[0], candidate.shape[1])
+        if score > best_score:
+            best_score = score
+            best_frame = candidate
+            best_frame.attrs["sheet_name"] = sheet_name
+
+    if best_frame is None:
+        raise DataLoaderError("Não foi possível identificar uma aba com cabeçalhos válidos na planilha.")
+
+    return best_frame
+
+
 def load_dataframe(filename: str, file_content: bytes) -> pd.DataFrame:
     """Return a DataFrame for the uploaded file content."""
     if not filename:
@@ -64,7 +152,7 @@ def load_dataframe(filename: str, file_content: bytes) -> pd.DataFrame:
         elif ext in {".tsv", ".tab"}:
             frame = _read_text_dataframe(file_content, delimiter="\t")
         elif ext in {".xls", ".xlsx"}:
-            frame = pd.read_excel(io.BytesIO(file_content))
+            frame = _read_excel_dataframe(file_content)
         elif ext == ".json":
             frame = _read_json_dataframe(file_content)
         else:
@@ -81,4 +169,3 @@ def load_dataframe(filename: str, file_content: bytes) -> pd.DataFrame:
 
     frame.columns = [str(col) for col in frame.columns]
     return frame
-

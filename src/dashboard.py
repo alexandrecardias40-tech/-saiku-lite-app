@@ -34,24 +34,115 @@ COLUMN_ALIASES: Dict[str, List[str]] = {
         "descricao das despesa",
         "tipo da despesa",
         "tipo objeto despesa",
+        "descricao do contrato",
+        "descricao detalhada",
+        "descricao despesa contrato",
+        "nome do contrato",
     ],
-    "ugr": ["ugr", "unidade gestora", "unidade gestoral", "unidade gestora responsavel"],
-    "pi": ["pi 2025", "pi", "plano interno", "pi2024", "pi2026", "plano interno 2025"],
-    "cnpj": ["cnpj", "cnpj fornecedor", "cnpj contratada", "cnpj/fornecedor"],
-    "processo": ["processo", "numero processo", "n processo", "processo sei", "processo administrativo"],
-    "contrato": ["n contrato", "numero contrato", "nº contrato", "contrato", "numero do contrato"],
-    "vigencia": ["vigencia", "vigencia final", "data vigencia", "vigencia termino", "vigencia fim"],
-    "status": ["status do contrato", "status", "situacao do contrato", "situação do contrato"],
-    "prorrogacao": ["situacao da prorrogacao", "situacao prorrogacao", "prorrogacao", "situação da prorrogação"],
+    "ugr": [
+        "ugr",
+        "unidade gestora",
+        "unidade gestoral",
+        "unidade gestora responsavel",
+        "unidade organizacional",
+        "unidade orcamentaria",
+        "uorg",
+    ],
+    "pi": [
+        "pi 2025",
+        "pi",
+        "plano interno",
+        "pi2024",
+        "pi2026",
+        "plano interno 2025",
+        "codigo pi",
+        "pi - 2025",
+        "plano interno (pi)",
+    ],
+    "cnpj": [
+        "cnpj",
+        "cnpj fornecedor",
+        "cnpj contratada",
+        "cnpj/fornecedor",
+        "cnpj da contratada",
+        "cpf/cnpj",
+    ],
+    "processo": [
+        "processo",
+        "numero processo",
+        "n processo",
+        "processo sei",
+        "processo administrativo",
+        "numero do processo",
+        "processo licitatorio",
+    ],
+    "contrato": [
+        "n contrato",
+        "numero contrato",
+        "nº contrato",
+        "contrato",
+        "numero do contrato",
+        "contrato numero",
+        "numero do instrumento",
+    ],
+    "vigencia": [
+        "vigencia",
+        "vigencia final",
+        "data vigencia",
+        "vigencia termino",
+        "vigencia fim",
+        "data fim vigencia",
+        "vigencia final contrato",
+    ],
+    "status": [
+        "status do contrato",
+        "status",
+        "situacao do contrato",
+        "situação do contrato",
+        "situacao",
+        "situacao atual",
+    ],
+    "prorrogacao": [
+        "situacao da prorrogacao",
+        "situacao prorrogacao",
+        "prorrogacao",
+        "situação da prorrogação",
+        "situacao prorrogacao contrato",
+    ],
     "valor_mensal": [
         "valor contrato media mensal",
         "valor contrato mensal",
         "valor medio mensal",
         "valor contratos media mensal",
+        "valor mensal medio",
+        "valor mensal",
+        "valor mensal previsto",
     ],
-    "total_estimado": ["total estimado anual", "estimado anual", "total estimado", "total previsto anual"],
-    "saldo_empenhos": ["saldo empenhos 2025", "saldo empenhos", "saldo de empenhos 2025"],
-    "saldo_rap": ["saldo de empenhos rap", "saldo empenhos rap", "saldo rap"],
+    "total_estimado": [
+        "total estimado anual",
+        "estimado anual",
+        "total estimado",
+        "total previsto anual",
+        "valor total 2025",
+        "total estimado (r$)",
+        "total anual",
+        "valor anual estimado",
+    ],
+    "saldo_empenhos": [
+        "saldo empenhos 2025",
+        "saldo empenhos",
+        "saldo de empenhos 2025",
+        "saldo 2025",
+        "saldo empenhos ate 2025",
+        "saldo empenho",
+    ],
+    "saldo_rap": [
+        "saldo de empenhos rap",
+        "saldo empenhos rap",
+        "saldo rap",
+        "saldo rap 2025",
+        "saldo rap atual",
+    ],
     "total_rap_empenho": [
         "total rap + empenho",
         "total rap+empenho",
@@ -59,6 +150,37 @@ COLUMN_ALIASES: Dict[str, List[str]] = {
         "total rap mais empenho",
         "total rap+ empenho",
         "total rap +empenho",
+        "total rap mais empenhos",
+        "total rap e empenhos",
+        "total empenho + rap",
+    ],
+    "executado_total": [
+        "executado total",
+        "valor executado",
+        "total executado",
+        "executado ate o momento",
+    ],
+    "empenhado_total": [
+        "empenhado total",
+        "valor empenhado",
+        "total empenhado",
+        "empenho total",
+    ],
+    "saldo_previsto": [
+        "saldo previsto",
+        "saldo a empenhar",
+        "saldo projetado",
+    ],
+    "execucao_pct": [
+        "execucao (%)",
+        "percentual execucao",
+        "taxa execucao",
+        "percentual de execucao",
+    ],
+    "media_mensal_exec": [
+        "media mensal executada",
+        "media mensal exec",
+        "media mensal de execucao",
     ],
 }
 
@@ -842,17 +964,30 @@ class DashboardManager:
                 warnings.append(f"Coluna '{field}' não foi localizada. Utilize os filtros para conferir os dados.")
 
         mapped = pd.DataFrame(index=frame.index)
+        numeric_fields = {
+            "valor_mensal",
+            "total_estimado",
+            "saldo_empenhos",
+            "saldo_rap",
+            "total_rap_empenho",
+            "executado_total",
+            "empenhado_total",
+            "saldo_previsto",
+            "media_mensal_exec",
+            "execucao_pct",
+        }
+
         for key in COLUMN_ALIASES:
             source = canonical.get(key)
             if source is not None:
-                if key in {"valor_mensal", "total_estimado", "saldo_empenhos", "saldo_rap", "total_rap_empenho"}:
+                if key in numeric_fields:
                     mapped[key] = _coerce_numeric(frame[source])
                 elif key == "vigencia":
                     mapped[key] = pd.to_datetime(frame[source], errors="coerce")
                 else:
                     mapped[key] = frame[source].astype(str).fillna("").str.strip()
             else:
-                if key in {"valor_mensal", "total_estimado", "saldo_empenhos", "saldo_rap", "total_rap_empenho"}:
+                if key in numeric_fields:
                     mapped[key] = 0.0
                 elif key == "vigencia":
                     mapped[key] = pd.NaT
