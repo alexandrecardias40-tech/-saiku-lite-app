@@ -1069,7 +1069,7 @@ def _handle_dashboard_trpc(path: str):
         except (ValueError, TypeError):
             batch_payload = {}
 
-    response_payload: Dict[str, Any] = {}
+    responses: List[Dict[str, Any]] = []
     for index, procedure in enumerate(procedures):
         key = str(index)
         proc_input = None
@@ -1078,9 +1078,19 @@ def _handle_dashboard_trpc(path: str):
             if isinstance(entry, dict):
                 proc_input = entry.get("json")
         result_data = _execute_dashboard_trpc_procedure(procedure, proc_input)
-        response_payload[key] = {"result": {"data": result_data}}
+        try:
+            response_id: Any = int(key)
+        except ValueError:
+            response_id = key
+        responses.append(
+            {
+                "result": {"data": result_data},
+                "id": response_id,
+                "jsonrpc": "2.0",
+            }
+        )
 
-    return Response(json.dumps(response_payload, ensure_ascii=False), status=200, mimetype="application/json")
+    return Response(json.dumps(responses, ensure_ascii=False), status=200, mimetype="application/json")
 
 
 def _proxy_request_to_backend(path: str):
