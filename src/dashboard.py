@@ -3,11 +3,13 @@ from __future__ import annotations
 import io
 import math
 import os
+import pickle
 import re
 import unicodedata
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 import matplotlib
@@ -739,11 +741,36 @@ def _normalize_chart_mode(value: Optional[str]) -> str:
 
 
 class DashboardManager:
-    def __init__(self) -> None:
+    def __init__(self, storage_dir: Path) -> None:
+        self._storage_dir = storage_dir
+        self._storage_dir.mkdir(parents=True, exist_ok=True)
         self._datasets: Dict[str, DashboardDataset] = {}
+        self._load_existing()
+
+    def _dataset_path(self, dataset_id: str) -> Path:
+        return self._storage_dir / f"{dataset_id}.pkl"
+
+    def _load_existing(self) -> None:
+        for dataset_file in self._storage_dir.glob("*.pkl"):
+            try:
+                with dataset_file.open("rb") as handle:
+                    dataset: DashboardDataset = pickle.load(handle)
+                self._datasets[dataset.id] = dataset
+            except Exception:
+                continue
+
+    def _persist(self, dataset: DashboardDataset) -> None:
+        path = self._dataset_path(dataset.id)
+        with path.open("wb") as handle:
+            pickle.dump(dataset, handle)
 
     def reset(self) -> None:
         self._datasets.clear()
+        for dataset_file in self._storage_dir.glob("*.pkl"):
+            try:
+                dataset_file.unlink()
+            except Exception:
+                continue
 
     def datasets(self) -> List[Dict[str, str]]:
         ordered = sorted(self._datasets.values(), key=lambda item: item.created_at, reverse=True)
@@ -751,6 +778,11 @@ class DashboardManager:
 
     def remove(self, dataset_id: str) -> None:
         self._datasets.pop(dataset_id, None)
+        path = self._dataset_path(dataset_id)
+        try:
+            path.unlink()
+        except Exception:
+            pass
 
     def get(self, dataset_id: str) -> DashboardDataset:
         if not dataset_id:
@@ -787,6 +819,7 @@ class DashboardManager:
             column_map=column_map,
         )
         self._datasets[dataset.id] = dataset
+        self._persist(dataset)
         return dataset
 
     def _prepare_dataset_frame(

@@ -72,6 +72,11 @@ USER_DB_PATH = os.environ.get("SAIKU_USER_DB", str(Path(app.instance_path) / "us
 user_store = UserStore(USER_DB_PATH)
 user_store.ensure_admin(ADMIN_USERNAME, ADMIN_PASSWORD)
 
+DATASET_STORAGE_DIR = Path(app.instance_path) / "datasets"
+DASHBOARD_STORAGE_DIR = Path(app.instance_path) / "dashboard_datasets"
+DATASET_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+DASHBOARD_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
+
 BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_UNB_DASHBOARD_PUBLIC = BASE_DIR / "unb-budget-dashboard" / "dist" / "public"
 UNB_DASHBOARD_PUBLIC = Path(
@@ -332,14 +337,40 @@ def change_password():
 
 
 class DatasetRegistry:
-    """In-memory storage for uploaded datasets."""
+    """Storage for uploaded datasets with disk persistence."""
 
-    def __init__(self) -> None:
+    def __init__(self, storage_dir: Path) -> None:
+        self._storage_dir = storage_dir
+        self._storage_dir.mkdir(parents=True, exist_ok=True)
         self._datasets: Dict[str, Dict[str, Any]] = {}
+        self._load_existing()
+
+    def _metadata_path(self, dataset_id: str) -> Path:
+        return self._storage_dir / f"{dataset_id}.json"
+
+    def _frame_path(self, dataset_id: str) -> Path:
+        return self._storage_dir / f"{dataset_id}.pkl"
+
+    def _load_existing(self) -> None:
+        for metadata_file in self._storage_dir.glob("*.json"):
+            try:
+                data = json.loads(metadata_file.read_text(encoding="utf-8"))
+                dataset_id = data["id"]
+            except Exception:
+                continue
+            data["frame"] = None
+            self._datasets[dataset_id] = data
+
+    def _persist_metadata(self, info: Dict[str, Any]) -> None:
+        metadata = {key: value for key, value in info.items() if key not in {"frame"}}
+        metadata_path = self._metadata_path(info["id"])
+        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
 
     def create(self, filename: str, dataframe: pd.DataFrame) -> Dict[str, Any]:
         dataset_id = str(uuid.uuid4())
         numeric_columns = dataframe.select_dtypes(include=["number", "bool"]).columns.tolist()
+        frame_path = self._frame_path(dataset_id)
+        dataframe.to_pickle(frame_path)
         info: Dict[str, Any] = {
             "id": dataset_id,
             "name": filename,
@@ -349,24 +380,53 @@ class DatasetRegistry:
             "measures": numeric_columns or dataframe.columns.tolist(),
             "row_count": int(dataframe.shape[0]),
             "schema": {col: str(dtype) for col, dtype in dataframe.dtypes.items()},
+            "_frame_path": str(frame_path),
         }
         self._datasets[dataset_id] = info
+        self._persist_metadata(info)
         return info
 
-    def get(self, dataset_id: str) -> Dict[str, Any]:
-        if dataset_id not in self._datasets:
+    def _load_from_disk(self, dataset_id: str) -> Dict[str, Any]:
+        metadata_path = self._metadata_path(dataset_id)
+        if not metadata_path.exists():
             raise KeyError(dataset_id)
-        return self._datasets[dataset_id]
+        data = json.loads(metadata_path.read_text(encoding="utf-8"))
+        frame_path = self._frame_path(dataset_id)
+        if frame_path.exists():
+            data["frame"] = pd.read_pickle(frame_path)
+        else:
+            data["frame"] = None
+        data["_frame_path"] = str(frame_path)
+        self._datasets[dataset_id] = data
+        return data
+
+    def get(self, dataset_id: str) -> Dict[str, Any]:
+        info = self._datasets.get(dataset_id)
+        if info is None:
+            info = self._load_from_disk(dataset_id)
+        if info.get("frame") is None:
+            frame_path = Path(info.get("_frame_path", self._frame_path(dataset_id)))
+            info["frame"] = pd.read_pickle(frame_path)
+        return info
 
     def ids(self) -> List[str]:
         return list(self._datasets.keys())
 
     def delete(self, dataset_id: str) -> None:
-        self._datasets.pop(dataset_id, None)
+        info = self._datasets.pop(dataset_id, None)
+        metadata_path = self._metadata_path(dataset_id)
+        frame_path = self._frame_path(dataset_id)
+        for path in (metadata_path, frame_path):
+            try:
+                path.unlink(missing_ok=True)
+            except Exception:
+                continue
+        if info and "frame" in info:
+            info.pop("frame", None)
 
 
-datasets = DatasetRegistry()
-dashboard_manager = DashboardManager()
+datasets = DatasetRegistry(DATASET_STORAGE_DIR)
+dashboard_manager = DashboardManager(DASHBOARD_STORAGE_DIR)
 
 
 def _dashboard_config() -> Dict[str, Any]:
