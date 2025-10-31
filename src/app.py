@@ -1082,13 +1082,14 @@ def _handle_dashboard_trpc(path: str):
             response_id: Any = int(key)
         except ValueError:
             response_id = key
-        responses.append(
-            {
-                "result": {"data": result_data},
-                "id": response_id,
-                "jsonrpc": "2.0",
-            }
-        )
+        responses.append({
+            "result": {
+                "type": "data",
+                "data": result_data,
+            },
+            "id": response_id,
+            "jsonrpc": "2.0",
+        })
 
     return Response(json.dumps(responses, ensure_ascii=False), status=200, mimetype="application/json")
 
