@@ -4,12 +4,9 @@ from __future__ import annotations
 import copy
 import io
 import json
-import math
 import os
-import re
 import shutil
 import uuid
-from datetime import datetime, timedelta
 from functools import wraps
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -61,12 +58,6 @@ from .users import UserStore
 app = Flask(__name__)
 app.config["SECRET_KEY"] = os.environ.get("SAIKU_SECRET_KEY", "change-me")
 
-
-@app.route("/healthz")
-def healthz() -> tuple[str, int]:
-    """Health check endpoint used by hosting providers."""
-    return "ok", 200
-
 ADMIN_USERNAME = os.environ.get("SAIKU_ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("SAIKU_ADMIN_PASSWORD", "senha123")
 
@@ -75,11 +66,6 @@ USER_DB_PATH = os.environ.get("SAIKU_USER_DB", str(Path(app.instance_path) / "us
 user_store = UserStore(USER_DB_PATH)
 user_store.ensure_admin(ADMIN_USERNAME, ADMIN_PASSWORD)
 
-DATASET_STORAGE_DIR = Path(app.instance_path) / "datasets"
-DASHBOARD_STORAGE_DIR = Path(app.instance_path) / "dashboard_datasets"
-DATASET_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-DASHBOARD_STORAGE_DIR.mkdir(parents=True, exist_ok=True)
-
 BASE_DIR = Path(__file__).resolve().parent.parent
 DEFAULT_UNB_DASHBOARD_PUBLIC = BASE_DIR / "unb-budget-dashboard" / "dist" / "public"
 UNB_DASHBOARD_PUBLIC = Path(
@@ -87,10 +73,6 @@ UNB_DASHBOARD_PUBLIC = Path(
 ).expanduser()
 DEFAULT_UNB_DASHBOARD_DATA = BASE_DIR / "unb-budget-dashboard" / "dashboard_data.json"
 UNB_DASHBOARD_DATA = Path(os.environ.get("UNB_DASHBOARD_DATA", str(DEFAULT_UNB_DASHBOARD_DATA))).expanduser()
-DASHBOARD_MODE = os.environ.get("SAIKU_DASHBOARD_MODE", "spa").strip().lower()
-
-_DASHBOARD_PAYLOAD_CACHE: Optional[Dict[str, Any]] = None
-_DASHBOARD_PAYLOAD_MTIME: float = 0.0
 
 def _get_current_user() -> Optional[Dict[str, Any]]:
     user_id = session.get("user_id")
@@ -344,40 +326,14 @@ def change_password():
 
 
 class DatasetRegistry:
-    """Storage for uploaded datasets with disk persistence."""
+    """In-memory storage for uploaded datasets."""
 
-    def __init__(self, storage_dir: Path) -> None:
-        self._storage_dir = storage_dir
-        self._storage_dir.mkdir(parents=True, exist_ok=True)
+    def __init__(self) -> None:
         self._datasets: Dict[str, Dict[str, Any]] = {}
-        self._load_existing()
-
-    def _metadata_path(self, dataset_id: str) -> Path:
-        return self._storage_dir / f"{dataset_id}.json"
-
-    def _frame_path(self, dataset_id: str) -> Path:
-        return self._storage_dir / f"{dataset_id}.pkl"
-
-    def _load_existing(self) -> None:
-        for metadata_file in self._storage_dir.glob("*.json"):
-            try:
-                data = json.loads(metadata_file.read_text(encoding="utf-8"))
-                dataset_id = data["id"]
-            except Exception:
-                continue
-            data["frame"] = None
-            self._datasets[dataset_id] = data
-
-    def _persist_metadata(self, info: Dict[str, Any]) -> None:
-        metadata = {key: value for key, value in info.items() if key not in {"frame"}}
-        metadata_path = self._metadata_path(info["id"])
-        metadata_path.write_text(json.dumps(metadata, ensure_ascii=False), encoding="utf-8")
 
     def create(self, filename: str, dataframe: pd.DataFrame) -> Dict[str, Any]:
         dataset_id = str(uuid.uuid4())
         numeric_columns = dataframe.select_dtypes(include=["number", "bool"]).columns.tolist()
-        frame_path = self._frame_path(dataset_id)
-        dataframe.to_pickle(frame_path)
         info: Dict[str, Any] = {
             "id": dataset_id,
             "name": filename,
@@ -387,53 +343,24 @@ class DatasetRegistry:
             "measures": numeric_columns or dataframe.columns.tolist(),
             "row_count": int(dataframe.shape[0]),
             "schema": {col: str(dtype) for col, dtype in dataframe.dtypes.items()},
-            "_frame_path": str(frame_path),
         }
         self._datasets[dataset_id] = info
-        self._persist_metadata(info)
         return info
-
-    def _load_from_disk(self, dataset_id: str) -> Dict[str, Any]:
-        metadata_path = self._metadata_path(dataset_id)
-        if not metadata_path.exists():
-            raise KeyError(dataset_id)
-        data = json.loads(metadata_path.read_text(encoding="utf-8"))
-        frame_path = self._frame_path(dataset_id)
-        if frame_path.exists():
-            data["frame"] = pd.read_pickle(frame_path)
-        else:
-            data["frame"] = None
-        data["_frame_path"] = str(frame_path)
-        self._datasets[dataset_id] = data
-        return data
 
     def get(self, dataset_id: str) -> Dict[str, Any]:
-        info = self._datasets.get(dataset_id)
-        if info is None:
-            info = self._load_from_disk(dataset_id)
-        if info.get("frame") is None:
-            frame_path = Path(info.get("_frame_path", self._frame_path(dataset_id)))
-            info["frame"] = pd.read_pickle(frame_path)
-        return info
+        if dataset_id not in self._datasets:
+            raise KeyError(dataset_id)
+        return self._datasets[dataset_id]
 
     def ids(self) -> List[str]:
         return list(self._datasets.keys())
 
     def delete(self, dataset_id: str) -> None:
-        info = self._datasets.pop(dataset_id, None)
-        metadata_path = self._metadata_path(dataset_id)
-        frame_path = self._frame_path(dataset_id)
-        for path in (metadata_path, frame_path):
-            try:
-                path.unlink(missing_ok=True)
-            except Exception:
-                continue
-        if info and "frame" in info:
-            info.pop("frame", None)
+        self._datasets.pop(dataset_id, None)
 
 
-datasets = DatasetRegistry(DATASET_STORAGE_DIR)
-dashboard_manager = DashboardManager(DASHBOARD_STORAGE_DIR)
+datasets = DatasetRegistry()
+dashboard_manager = DashboardManager()
 
 
 def _dashboard_config() -> Dict[str, Any]:
@@ -540,16 +467,8 @@ def _render_dashboard_fallback():
 
 
 def _serve_dashboard_entry():
-    if DASHBOARD_MODE == "fallback":
-        return _render_dashboard_fallback()
-
     _start_node_server()
     if _unb_dashboard_available():
-        if not _dashboard_backend_available():
-            app.logger.warning(
-                "UnB dashboard SPA disponível sem backend Node.js. "
-                "Respondendo via camada interna."
-            )
         return _serve_unb_dashboard_index()
 
     dashboard_dir = os.path.join(app.static_folder, "dashboard")
@@ -562,50 +481,6 @@ def _serve_dashboard_entry():
         return response
 
     return _render_dashboard_fallback()
-
-
-def _dashboard_payload_default() -> Dict[str, Any]:
-    return {
-        "kpis": {
-            "total_anual_estimado": 0.0,
-            "total_empenhado": 0.0,
-            "total_comprometido": 0.0,
-            "saldo_a_empenhar": 0.0,
-            "percentual_execucao": 0.0,
-            "taxa_execucao": 0.0,
-            "count_expiring_contracts": 0,
-            "count_expired_contracts": 0,
-        },
-        "monthly_consumption": [],
-        "ugr_analysis": [],
-        "expiring_contracts_list": [],
-        "expired_contracts_list": [],
-        "raw_data_for_filters": [],
-    }
-
-
-def _load_dashboard_payload() -> Dict[str, Any]:
-    global _DASHBOARD_PAYLOAD_CACHE, _DASHBOARD_PAYLOAD_MTIME
-    try:
-        stats = UNB_DASHBOARD_DATA.stat()
-    except FileNotFoundError:
-        return _dashboard_payload_default()
-
-    if (
-        _DASHBOARD_PAYLOAD_CACHE is None
-        or not isinstance(_DASHBOARD_PAYLOAD_CACHE, dict)
-        or _DASHBOARD_PAYLOAD_MTIME != stats.st_mtime
-    ):
-        try:
-            data = json.loads(UNB_DASHBOARD_DATA.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            _DASHBOARD_PAYLOAD_CACHE = _dashboard_payload_default()
-            _DASHBOARD_PAYLOAD_MTIME = stats.st_mtime
-            return copy.deepcopy(_DASHBOARD_PAYLOAD_CACHE)
-        _DASHBOARD_PAYLOAD_CACHE = data
-        _DASHBOARD_PAYLOAD_MTIME = stats.st_mtime
-
-    return copy.deepcopy(_DASHBOARD_PAYLOAD_CACHE)
 
 
 def _persist_unb_dashboard_dataset(dataset):
@@ -623,14 +498,6 @@ def _persist_unb_dashboard_dataset(dataset):
     except Exception:
         app.logger.exception("Erro ao salvar dashboard_data.json")
         raise
-    try:
-        stats = UNB_DASHBOARD_DATA.stat()
-    except FileNotFoundError:
-        stats = None
-    global _DASHBOARD_PAYLOAD_CACHE, _DASHBOARD_PAYLOAD_MTIME
-    _DASHBOARD_PAYLOAD_CACHE = copy.deepcopy(payload)
-    if stats:
-        _DASHBOARD_PAYLOAD_MTIME = stats.st_mtime
     _notify_unb_backend_refresh()
 
 
@@ -764,13 +631,7 @@ def _dashboard_backend_available() -> bool:
     """Indica se existe backend configurado para alimentar o SPA."""
     if not _using_local_dashboard_backend():
         return True
-    if not _node_environment_ready():
-        return False
-    try:
-        response = requests.get(API_BACKEND, timeout=1)
-        return response.ok
-    except requests.RequestException:
-        return False
+    return _node_environment_ready()
 
 
 def _start_node_server():
@@ -830,284 +691,11 @@ def shutdown_node_server(exception=None):
         NODE_SERVER_PROCESS = None
 
 
-_MONTH_KEY_REGEX = re.compile(r"^\d{4}-\d{2}-\d{2}")
-
-
-def _dash_to_number(value: Any) -> float:
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return 0.0
-    return number if math.isfinite(number) else 0.0
-
-
-def _dash_sum_month_values(row: Dict[str, Any]) -> float:
-    total = 0.0
-    for key, value in row.items():
-        if isinstance(key, str) and _MONTH_KEY_REGEX.match(key):
-            total += _dash_to_number(value)
-    return total
-
-
-def _dash_normalize_row(row: Dict[str, Any]) -> Dict[str, Any]:
-    normalized = dict(row)
-    total_estimado = _dash_to_number(row.get("Total_Anual_Estimado"))
-    executado_informado = _dash_to_number(row.get("Executado_Total"))
-    empenho_rap = _dash_to_number(row.get("Total_Empenho_RAP"))
-    saldo25 = _dash_to_number(row.get("Saldo_Empenhos_2025"))
-    saldo_rap = _dash_to_number(row.get("Saldo_Empenhos_RAP"))
-    meses = _dash_sum_month_values(row)
-
-    comprometido = empenho_rap or (saldo25 + saldo_rap)
-    executado = executado_informado or meses or comprometido
-    taxa_execucao = (executado / total_estimado * 100.0) if total_estimado > 0 else 0.0
-
-    normalized.update(
-        {
-            "Total_Anual_Estimado": total_estimado,
-            "Total_Empenho_RAP": comprometido,
-            "Executado_Total": executado,
-            "Taxa_Execucao": taxa_execucao,
-        }
-    )
-    return normalized
-
-
-def _dash_normalize_token(value: Any) -> str:
-    text = str(value or "").strip().lower()
-    if text in {"", "nan", "none", "null"}:
-        return ""
-    return text
-
-
-def _dash_should_discard_row(row: Dict[str, Any]) -> bool:
-    description = _dash_normalize_token(row.get("Despesa") or row.get("descricao"))
-    ugr = _dash_normalize_token(row.get("UGR") or row.get("ugr"))
-    pi = _dash_normalize_token(row.get("PI_2025") or row.get("pi"))
-
-    if not description:
-        return False
-    if description in {"total", "total geral"}:
-        return True
-    if description.startswith("total da") or description.startswith("total de"):
-        return True
-    if description.startswith("total ") and not ugr:
-        return True
-    if not description and not ugr and not pi:
-        return True
-    return False
-
-
-def _dash_build_ugr_analysis(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    today = datetime.utcnow().date()
-    stats_map: Dict[str, Dict[str, Any]] = {}
-
-    for row in rows:
-        ugr_key = str(row.get("UGR") or "Não informado")
-        stats = stats_map.setdefault(
-            ugr_key,
-            {
-                "UGR": ugr_key,
-                "Total_Anual_Estimado": 0.0,
-                "Total_Empenho_RAP": 0.0,
-                "Executado_Total": 0.0,
-                "Comprometido_Total": 0.0,
-                "Contratos_Ativos": 0,
-                "Contratos_Expirados": 0,
-                "Percentual_Execucao": 0.0,
-            },
-        )
-
-        total_estimado = _dash_to_number(row.get("Total_Anual_Estimado"))
-        executado = _dash_to_number(row.get("Executado_Total"))
-        rap = _dash_to_number(row.get("Total_Empenho_RAP"))
-        saldo = _dash_to_number(row.get("Saldo_Empenhos_2025")) + _dash_to_number(row.get("Saldo_Empenhos_RAP"))
-        comprometido = rap if rap > 0 else saldo
-        status = str(row.get("Status_Contrato") or "").upper()
-
-        stats["Total_Anual_Estimado"] += total_estimado
-        stats["Executado_Total"] += executado
-        stats["Total_Empenho_RAP"] += comprometido
-        stats["Comprometido_Total"] += comprometido
-
-        expired = False
-        raw_date = row.get("Data_Vigencia_Fim")
-        if raw_date:
-            try:
-                parsed = datetime.fromisoformat(str(raw_date).split()[0])
-                if parsed.date() < today:
-                    expired = True
-            except ValueError:
-                expired = False
-        if not expired:
-            if "VENC" in status and "VENCENDO" not in status:
-                expired = True
-
-        if expired:
-            stats["Contratos_Expirados"] += 1
-        else:
-            stats["Contratos_Ativos"] += 1
-
-    results: List[Dict[str, Any]] = []
-    for stats in stats_map.values():
-        total_estimado = stats["Total_Anual_Estimado"]
-        executado = stats["Executado_Total"]
-        stats["Percentual_Execucao"] = (executado / total_estimado * 100.0) if total_estimado > 0 else 0.0
-        results.append(stats)
-
-    return results
-
-
-def _dash_build_kpis(rows: List[Dict[str, Any]]) -> Dict[str, Any]:
-    total_estimado = sum(_dash_to_number(row.get("Total_Anual_Estimado")) for row in rows)
-    executado = sum(_dash_to_number(row.get("Executado_Total")) for row in rows)
-    comprometido = 0.0
-    for row in rows:
-        rap = _dash_to_number(row.get("Total_Empenho_RAP"))
-        saldo = _dash_to_number(row.get("Saldo_Empenhos_2025")) + _dash_to_number(row.get("Saldo_Empenhos_RAP"))
-        comprometido += rap if rap > 0 else saldo
-
-    saldo_a_empenhar = max(total_estimado - executado, 0.0)
-    percentual = (executado / total_estimado * 100.0) if total_estimado > 0 else 0.0
-
-    today = datetime.utcnow().date()
-    expiring = 0
-    expired = 0
-    for row in rows:
-        raw_date = row.get("Data_Vigencia_Fim")
-        status = str(row.get("Status_Contrato") or "").upper()
-        delta: Optional[int] = None
-        if raw_date:
-            try:
-                parsed = datetime.fromisoformat(str(raw_date).split()[0])
-                delta = (parsed.date() - today).days
-            except ValueError:
-                delta = None
-        if delta is not None:
-            if 0 <= delta <= LIMITE_DIAS_VENCIMENTO:
-                expiring += 1
-            elif delta < 0:
-                expired += 1
-        elif "VENC" in status and "VENCENDO" not in status:
-            expired += 1
-
-    return {
-        "total_anual_estimado": total_estimado,
-        "total_empenhado": executado,
-        "total_comprometido": comprometido,
-        "saldo_a_empenhar": saldo_a_empenhar,
-        "percentual_execucao": percentual,
-        "taxa_execucao": percentual,
-        "count_expiring_contracts": expiring,
-        "count_expired_contracts": expired,
-    }
-
-
-def _normalized_dashboard_payload() -> Dict[str, Any]:
-    payload = _load_dashboard_payload()
-    rows = payload.get("raw_data_for_filters") or []
-    filtered = [row for row in rows if isinstance(row, dict) and not _dash_should_discard_row(row)]
-    normalized_rows = [_dash_normalize_row(dict(row)) for row in filtered]
-
-    normalized_payload = copy.deepcopy(payload)
-    if isinstance(normalized_payload.get("kpis"), dict):
-        existing_kpis = dict(normalized_payload["kpis"])
-    else:
-        existing_kpis = {}
-
-    normalized_payload["raw_data_for_filters"] = normalized_rows
-    normalized_payload["ugr_analysis"] = _dash_build_ugr_analysis(normalized_rows)
-    normalized_payload["kpis"] = {**existing_kpis, **_dash_build_kpis(normalized_rows)}
-
-    return normalized_payload
-
-
-def _execute_dashboard_trpc_procedure(name: str, payload: Any) -> Any:
-    if name == "auth.me":
-        user = _get_current_user()
-        return _public_user(user)
-    if name == "auth.logout":
-        session.clear()
-        return {"success": True}
-
-    if not name.startswith("budget."):
-        return None
-
-    data = _normalized_dashboard_payload()
-    if name == "budget.getKPIs":
-        return data.get("kpis", {})
-    if name == "budget.getUGRAnalysis":
-        return data.get("ugr_analysis", [])
-    if name == "budget.getMonthlyConsumption":
-        return data.get("monthly_consumption", [])
-    if name == "budget.getExpiringContracts":
-        return data.get("expiring_contracts_list", [])
-    if name == "budget.getExpiredContracts":
-        return data.get("expired_contracts_list", [])
-    if name == "budget.getAllData":
-        return data.get("raw_data_for_filters", [])
-    if name == "budget.uploadFile":
-        return {"success": True, "message": "Arquivo processado com sucesso!"}
-    return None
-
-
-def _handle_dashboard_trpc(path: str):
-    prefix = "/api/trpc"
-    procedure_path = path[len(prefix):].lstrip("/") if path.startswith(prefix) else path.lstrip("/")
-    if not procedure_path:
-        return Response("{}", status=200, mimetype="application/json")
-
-    procedures = [item for item in procedure_path.split(",") if item]
-    if not procedures:
-        return Response("{}", status=200, mimetype="application/json")
-
-    raw_input = request.args.get("input")
-    if raw_input is None and request.method != "GET":
-        raw_input = request.get_data(as_text=True)
-
-    if not raw_input or raw_input == "null":
-        batch_payload: Dict[str, Any] = {}
-    else:
-        try:
-            batch_payload = json.loads(raw_input)
-        except (ValueError, TypeError):
-            batch_payload = {}
-
-    responses: List[Dict[str, Any]] = []
-    for index, procedure in enumerate(procedures):
-        key = str(index)
-        proc_input = None
-        if isinstance(batch_payload, dict):
-            entry = batch_payload.get(key)
-            if isinstance(entry, dict):
-                proc_input = entry.get("json")
-        result_data = _execute_dashboard_trpc_procedure(procedure, proc_input)
-        try:
-            response_id: Any = int(key)
-        except ValueError:
-            response_id = key
-        result_wrapper = {
-            "type": "data",
-            "data": result_data,
-        }
-        responses.append({
-            "result": result_wrapper,
-            "id": response_id,
-            "jsonrpc": "2.0",
-        })
-
-    return Response(json.dumps(responses, ensure_ascii=False), status=200, mimetype="application/json")
-
-
 def _proxy_request_to_backend(path: str):
     # Build target URL
     target = urljoin(API_BACKEND.rstrip('/') + '/', path.lstrip('/'))
     # Forward headers (except Host)
     headers = {k: v for k, v in request.headers if k.lower() != 'host'}
-    if _using_local_dashboard_backend():
-        if path.startswith("/api/trpc"):
-            return _handle_dashboard_trpc(path)
-        return jsonify({"error": "Backend do dashboard indisponível."}), 503
     try:
         resp = requests.request(
             method=request.method,
